@@ -1,4 +1,5 @@
 import { ReactComponent as AssistantIcon } from '@/assets/svg/assistant.svg';
+import { DeepinsightGenerationButtons } from '@/components/deepinsight-generation-buttons';
 import { MessageType } from '@/constants/chat';
 import { IReferenceChunk, IReferenceObject } from '@/interfaces/database/chat';
 import classNames from 'classnames';
@@ -32,9 +33,7 @@ import { ReferenceDocumentList } from './reference-document-list';
 import { UploadedMessageFiles } from './uploaded-message-files';
 
 interface IProps
-  extends Partial<IRemoveMessageById>,
-    IRegenerateMessage,
-    PropsWithChildren {
+  extends Partial<IRemoveMessageById>, IRegenerateMessage, PropsWithChildren {
   item: IMessage;
   conversationId?: string;
   currentEventListWithoutMessageById?: (messageId: string) => INodeEvent[];
@@ -53,6 +52,9 @@ interface IProps
   showLoudspeaker?: boolean;
   showLog?: boolean;
   isShare?: boolean;
+  isDeepinsightChat?: boolean;
+  isDeepinsightConference?: boolean;
+  isCompleted?: boolean;
 }
 
 function MessageItem({
@@ -75,6 +77,9 @@ function MessageItem({
   children,
   showLog,
   isShare,
+  isDeepinsightChat = false,
+  isDeepinsightConference = false,
+  isCompleted = false,
 }: IProps) {
   const { theme } = useTheme();
   const isAssistant = item.role === MessageType.Assistant;
@@ -82,11 +87,47 @@ function MessageItem({
   const [showThinking, setShowThinking] = useState(false);
   const { setLastSendLoadingFunc } = useContext(AgentChatContext);
 
+  // Helper function to normalize content field (can be string or array)
+  const getContentString = (content: any): string => {
+    if (typeof content === 'string') {
+      return content;
+    }
+    if (Array.isArray(content)) {
+      return content.map((item: any) => item.content || '').join('\n');
+    }
+    return '';
+  };
+
+  // Helper function to filter out result type items in deepinsightChat mode
+  const filterResultContent = (content: any): any => {
+    console.log('Filtering content in MessageItem:', content);
+    if (!isDeepinsightChat) {
+      return content;
+    }
+
+    if (typeof content === 'string') {
+      // Remove <result>...</result> tags from string content
+      return content.replace(/<result>[\s\S]*?<\/result>/gi, '').trim();
+    }
+
+    if (Array.isArray(content)) {
+      // Only keep items with process==='' (empty string) AND type!=='result'
+      return content.filter((item: any) => {
+        if (!item) return true;
+        const isEmptyProcess = item.process === '';
+        const isResultType = item.type === 'result';
+        return isEmptyProcess && !isResultType;
+      });
+    }
+
+    return content;
+  };
+
   useEffect(() => {
     if (typeof setLastSendLoadingFunc === 'function') {
       setLastSendLoadingFunc(loading, item.id);
     }
-  }, [loading, setLastSendLoadingFunc, item.id]);
+  }, [loading, setLastSendLoadingFunc, item.id, isDeepinsightChat]);
 
   const referenceDocuments = useMemo(() => {
     const docs = reference?.doc_aggs ?? {};
@@ -164,21 +205,23 @@ function MessageItem({
               <div className="space-x-1">
                 {isAssistant ? (
                   <>
-                    {isShare && !sendLoading && !isEmpty(item.content) && (
-                      <AssistantGroupButton
-                        messageId={item.id}
-                        content={item.content}
-                        prompt={item.prompt}
-                        showLikeButton={showLikeButton}
-                        audioBinary={item.audio_binary}
-                        showLoudspeaker={showLoudspeaker}
-                        showLog={showLog}
-                      ></AssistantGroupButton>
-                    )}
+                    {isShare &&
+                      !sendLoading &&
+                      !isEmpty(getContentString(item.content)) && (
+                        <AssistantGroupButton
+                          messageId={item.id}
+                          content={getContentString(item.content)}
+                          prompt={item.prompt}
+                          showLikeButton={showLikeButton}
+                          audioBinary={item.audio_binary}
+                          showLoudspeaker={showLoudspeaker}
+                          showLog={showLog}
+                        ></AssistantGroupButton>
+                      )}
                     {!isShare && (
                       <AssistantGroupButton
                         messageId={item.id}
-                        content={item.content}
+                        content={getContentString(item.content)}
                         prompt={item.prompt}
                         showLikeButton={showLikeButton}
                         audioBinary={item.audio_binary}
@@ -189,7 +232,7 @@ function MessageItem({
                   </>
                 ) : (
                   <UserGroupButton
-                    content={item.content}
+                    content={getContentString(item.content)}
                     messageId={item.id}
                     removeMessageById={removeMessageById}
                     regenerateMessage={
@@ -225,14 +268,14 @@ function MessageItem({
                 'bg-bg-card': !isAssistant,
               })}
             >
-              {item.data ? (
+              {item.data && children ? (
                 children
-              ) : sendLoading && isEmpty(item.content) ? (
+              ) : sendLoading && isEmpty(getContentString(item.content)) ? (
                 <>{!isShare && 'running...'}</>
               ) : (
                 <MarkdownContent
                   loading={loading}
-                  content={item.content}
+                  content={getContentString(filterResultContent(item.content))}
                   reference={reference}
                   clickDocumentButton={clickDocumentButton}
                 ></MarkdownContent>
@@ -243,6 +286,17 @@ function MessageItem({
                 list={referenceDocuments}
               ></ReferenceDocumentList>
             )}
+
+            {isAssistant &&
+              isCompleted &&
+              (isDeepinsightChat || isDeepinsightConference) &&
+              conversationId && (
+                <DeepinsightGenerationButtons
+                  conversationId={conversationId}
+                  messageId={item.id}
+                  messageContent={getContentString(item.content)}
+                />
+              )}
 
             {isUser && (
               <UploadedMessageFiles files={item.files}></UploadedMessageFiles>

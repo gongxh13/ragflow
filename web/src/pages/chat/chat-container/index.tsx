@@ -1,5 +1,6 @@
 import MessageItem from '@/components/message-item';
-import { MessageType } from '@/constants/chat';
+import { ChatSearchParams, MessageType } from '@/constants/chat';
+import { useStreamingRequest } from '@/contexts/streaming-request-context';
 import { Flex, Spin } from 'antd';
 import {
   useCreateConversationBeforeUploadDocument,
@@ -10,6 +11,7 @@ import {
 } from '../hooks';
 import { buildMessageItemReference } from '../utils';
 
+import DeepInsightThinkingPanel from '@/components/deepinsight-thinking-panel';
 import MessageInput from '@/components/message-input';
 import PdfDrawer from '@/components/pdf-drawer';
 import { useClickDrawer } from '@/components/pdf-drawer/hooks';
@@ -19,18 +21,33 @@ import {
   useGetChatSearchParams,
 } from '@/hooks/chat-hooks';
 import { useFetchUserInfo } from '@/hooks/user-setting-hooks';
+import { AnswerItem } from '@/interfaces/database/chat';
 import { buildMessageUuidWithRole } from '@/utils/chat';
-import { memo } from 'react';
-import styles from './index.less';
+import { useEffect, useMemo } from 'react';
+import { useLocation } from 'umi';
 
 interface IProps {
   controller: AbortController;
+  settingsPanelOpen?: boolean;
 }
 
-const ChatContainer = ({ controller }: IProps) => {
+const ChatContainer = ({ controller, settingsPanelOpen = false }: IProps) => {
   const { conversationId } = useGetChatSearchParams();
   const { data: conversation } = useFetchNextConversation();
   const { data: currentDialog } = useFetchNextDialog();
+  const { search } = useLocation();
+  const { setIsStreaming } = useStreamingRequest();
+
+  // 获取路由参数，判断会话类型
+  const conversationApi = useMemo(() => {
+    const params = new URLSearchParams(search);
+    return params.get(ChatSearchParams.ConversationApi) || '';
+  }, [search]);
+
+  // 判断是否为任何 deepinsight 模式
+  const isDeepinsightMode =
+    conversationApi === 'deepinsightChat' ||
+    conversationApi === 'deepinsightConferenceQuestion';
 
   const {
     value,
@@ -46,6 +63,57 @@ const ChatContainer = ({ controller }: IProps) => {
     stopOutputMessage,
   } = useSendNextMessage(controller);
 
+  // 将 sendLoading 状态同步到全局 Context
+  useEffect(() => {
+    setIsStreaming(sendLoading);
+  }, [sendLoading, setIsStreaming]);
+
+  // 提取deepinsight思考数据
+  const thinkingData = useMemo(() => {
+    const lastMessage = derivedMessages?.[derivedMessages.length - 1];
+    // 尝试从 answer 字段获取数据，而不是 answerArray
+    const answerArray =
+      lastMessage?.data?.answer || lastMessage?.data?.answerArray;
+    if (
+      lastMessage?.role === MessageType.Assistant &&
+      Array.isArray(answerArray)
+    ) {
+      return answerArray as AnswerItem[];
+    }
+    return [];
+  }, [derivedMessages]);
+
+  // 在 deepinsight 模式下，根据 conversationApi 类型进行不同的消息过滤
+  const filteredMessages = useMemo(() => {
+    if (!isDeepinsightMode) {
+      return derivedMessages;
+    }
+
+    // 对于 deepinsightChat，过滤掉 type 为 think 和 result 的消息
+    if (conversationApi === 'deepinsightChat') {
+      return derivedMessages?.filter((msg) => {
+        // 保留所有用户消息
+        if (msg.role === MessageType.User) {
+          return true;
+        }
+        // 对于助手消息，过滤掉 type 为 think 或 result 的
+        if (msg.role === MessageType.Assistant) {
+          const messageType = msg.data?.type;
+          return messageType !== 'think' && messageType !== 'result';
+        }
+        return true;
+      });
+    }
+
+    // 对于 deepinsightConferenceQuestion 和其他模式，保留所有消息
+    return derivedMessages;
+  }, [derivedMessages, isDeepinsightMode, conversationApi]);
+
+  // 检测是否为deepinsightChat模式
+  const isDeepinsightChat = useMemo(() => {
+    return thinkingData.length > 0;
+  }, [thinkingData]);
+
   const { visible, hideModal, documentId, selectedChunk, clickDocumentButton } =
     useClickDrawer();
   const disabled = useGetSendButtonDisabled();
@@ -57,46 +125,66 @@ const ChatContainer = ({ controller }: IProps) => {
 
   return (
     <>
-      <Flex flex={1} className={styles.chatContainer} vertical>
+      <Flex
+        flex={1}
+        className={`${styles.chatContainer} ${isDeepinsightChat ? styles.withThinkingPanel : ''}`}
+        vertical
+      >
         <Flex
           flex={1}
-          vertical
-          className={styles.messageContainer}
-          ref={messageContainerRef}
+          className={styles.messageWrapper}
+          style={{ width: '100%', boxSizing: 'border-box' }}
         >
-          <div>
-            <Spin spinning={loading}>
-              {derivedMessages?.map((message, i) => {
-                return (
-                  <MessageItem
-                    loading={
-                      message.role === MessageType.Assistant &&
-                      sendLoading &&
-                      derivedMessages.length - 1 === i
-                    }
-                    key={buildMessageUuidWithRole(message)}
-                    item={message}
-                    nickname={userInfo.nickname}
-                    avatar={userInfo.avatar}
-                    avatarDialog={currentDialog.icon}
-                    reference={buildMessageItemReference(
-                      {
-                        message: derivedMessages,
-                        reference: conversation.reference,
-                      },
-                      message,
-                    )}
-                    clickDocumentButton={clickDocumentButton}
-                    index={i}
-                    removeMessageById={removeMessageById}
-                    regenerateMessage={regenerateMessage}
-                    sendLoading={sendLoading}
-                  ></MessageItem>
-                );
-              })}
-            </Spin>
-          </div>
-          <div ref={scrollRef} />
+          <Flex
+            flex={1}
+            vertical
+            className={styles.messageContainer}
+            ref={messageContainerRef}
+          >
+            <div style={{ width: '100%', boxSizing: 'border-box' }}>
+              <Spin spinning={loading}>
+                {filteredMessages?.map((message, i) => {
+                  return (
+                    <MessageItem
+                      loading={
+                        message.role === MessageType.Assistant &&
+                        sendLoading &&
+                        filteredMessages.length - 1 === i
+                      }
+                      key={buildMessageUuidWithRole(message)}
+                      item={message}
+                      nickname={userInfo.nickname}
+                      avatar={userInfo.avatar}
+                      avatarDialog={currentDialog.icon}
+                      reference={buildMessageItemReference(
+                        {
+                          message: derivedMessages,
+                          reference: conversation.reference,
+                        },
+                        message,
+                      )}
+                      clickDocumentButton={clickDocumentButton}
+                      index={i}
+                      removeMessageById={removeMessageById}
+                      regenerateMessage={regenerateMessage}
+                      sendLoading={sendLoading}
+                    ></MessageItem>
+                  );
+                })}
+              </Spin>
+            </div>
+            <div ref={scrollRef} />
+          </Flex>
+
+          {isDeepinsightChat && !settingsPanelOpen && (
+            <div className={styles.thinkingPanelWrapper}>
+              <DeepInsightThinkingPanel
+                data={thinkingData}
+                // 在 deepinsightChat 模式下不要在右侧面板显示加载框
+                loading={isDeepinsightMode ? false : sendLoading}
+              />
+            </div>
+          )}
         </Flex>
         <MessageInput
           disabled={disabled}

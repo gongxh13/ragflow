@@ -17,6 +17,7 @@ import { useCallback, useEffect } from 'react';
 import { useParams } from 'umi';
 import { v4 as uuid } from 'uuid';
 import { IMessage } from '../chat/interface';
+import useConversationApi from './use-conversation-api';
 import { useFindPrologueFromDialogList } from './use-select-conversation-list';
 import { useSetChatRouteParams } from './use-set-chat-route';
 import { useSetConversation } from './use-set-conversation';
@@ -82,7 +83,11 @@ export const useSelectNextMessages = () => {
   };
 };
 
-export const useSendMessage = (controller: AbortController) => {
+export const useSendMessage = (
+  controller: AbortController,
+  selectedKbs?: string[],
+  webSearch?: boolean,
+) => {
   const { setConversation } = useSetConversation();
   const { conversationId, isNew } = useGetChatSearchParams();
   const { handleInputChange, value, setValue } = useHandleMessageInputChange();
@@ -90,9 +95,8 @@ export const useSendMessage = (controller: AbortController) => {
   const { handleUploadFile, fileIds, clearFileIds, isUploading, removeFile } =
     useUploadFile();
 
-  const { send, answer, done } = useSendMessageWithSse(
-    api.completeConversation,
-  );
+  const url = useConversationApi();
+  const { send, answer, done } = useSendMessageWithSse(url);
   const {
     scrollRef,
     messageContainerRef,
@@ -133,17 +137,32 @@ export const useSendMessage = (controller: AbortController) => {
       currentConversationId?: string;
       messages?: Message[];
     }) => {
-      const res = await send(
-        {
-          conversation_id: currentConversationId ?? conversationId,
-          messages: [...(messages ?? derivedMessages ?? []), message],
-        },
-        controller,
-      );
+      let body: any = {
+        conversation_id: currentConversationId ?? conversationId,
+        messages: [...(messages ?? derivedMessages ?? []), message],
+      };
+
+      // 如果是 deepinsight API，添加 deepinsight 特定参数
+      if (
+        url === api.deepinsightConferenceQuestion ||
+        url === api.deepinsightChat
+      ) {
+        body.type = 'chat';
+        body.sources = {
+          knowledge: selectedKbs ?? [],
+          web_search: webSearch ?? false,
+          intra_search: false,
+          write_experts: [],
+          review_experts: [],
+        };
+        body.deepinsight_mode = 'normal';
+      }
+
+      const res = await send(body, controller);
 
       if (res && (res?.response.status !== 200 || res?.data?.code !== 0)) {
         // cancel loading
-        setValue(message.content);
+        setValue(typeof message.content === 'string' ? message.content : '');
         console.info('removeLatestMessage111');
         removeLatestMessage();
       }
@@ -155,6 +174,9 @@ export const useSendMessage = (controller: AbortController) => {
       setValue,
       send,
       controller,
+      url,
+      selectedKbs,
+      webSearch,
     ],
   );
 
@@ -165,7 +187,7 @@ export const useSendMessage = (controller: AbortController) => {
         sendMessage({ message });
       } else {
         const data = await setConversation(
-          message.content,
+          typeof message.content === 'string' ? message.content : '',
           true,
           conversationId,
         );
@@ -248,5 +270,7 @@ export const useSendMessage = (controller: AbortController) => {
     handleUploadFile: onUploadFile,
     isUploading,
     removeFile,
+    handleSendMessage,
+    addNewestQuestion,
   };
 };

@@ -1,29 +1,46 @@
+import DeepInsightThinkingPanel from '@/components/deepinsight-thinking-panel';
 import { NextMessageInput } from '@/components/message-input/next';
 import MessageItem from '@/components/message-item';
 import PdfDrawer from '@/components/pdf-drawer';
 import { useClickDrawer } from '@/components/pdf-drawer/hooks';
-import { MessageType } from '@/constants/chat';
+import { ChatSearchParams, MessageType } from '@/constants/chat';
+import { useStreamingRequest } from '@/contexts/streaming-request-context';
 import {
   useFetchConversation,
   useFetchDialog,
   useGetChatSearchParams,
 } from '@/hooks/use-chat-request';
 import { useFetchUserInfo } from '@/hooks/user-setting-hooks';
+import { AnswerItem } from '@/interfaces/database/chat';
 import { buildMessageUuidWithRole } from '@/utils/chat';
+import { useEffect, useMemo, useState } from 'react';
+import { v4 as uuid } from 'uuid';
 import {
   useGetSendButtonDisabled,
   useSendButtonDisabled,
 } from '../../hooks/use-button-disabled';
 import { useCreateConversationBeforeUploadDocument } from '../../hooks/use-create-conversation';
+import { useDeepinsightCompletion } from '../../hooks/use-deepinsight-completion';
 import { useSendMessage } from '../../hooks/use-send-chat-message';
 import { buildMessageItemReference } from '../../utils';
 
 interface IProps {
   controller: AbortController;
   stopOutputMessage(): void;
+  thinkingPanelVisible?: boolean;
 }
 
-export function SingleChatBox({ controller, stopOutputMessage }: IProps) {
+export function SingleChatBox({
+  controller,
+  stopOutputMessage,
+  thinkingPanelVisible = true,
+}: IProps) {
+  const { visible, hideModal, documentId, selectedChunk, clickDocumentButton } =
+    useClickDrawer();
+  const [selectedKbs, setSelectedKbs] = useState<string[]>([]);
+  const [webSearch, setWebSearch] = useState(false);
+  const { setIsStreaming } = useStreamingRequest();
+
   const {
     value,
     scrollRef,
@@ -37,7 +54,14 @@ export function SingleChatBox({ controller, stopOutputMessage }: IProps) {
     removeMessageById,
     handleUploadFile,
     removeFile,
-  } = useSendMessage(controller);
+    handleSendMessage,
+    addNewestQuestion,
+  } = useSendMessage(controller, selectedKbs, webSearch);
+
+  // 将 sendLoading 状态同步到全局 Context
+  useEffect(() => {
+    setIsStreaming(sendLoading);
+  }, [sendLoading, setIsStreaming]);
   const { data: userInfo } = useFetchUserInfo();
   const { data: currentDialog } = useFetchDialog();
   const { createConversationBeforeUploadDocument } =
@@ -46,67 +70,334 @@ export function SingleChatBox({ controller, stopOutputMessage }: IProps) {
   const { data: conversation } = useFetchConversation();
   const disabled = useGetSendButtonDisabled();
   const sendDisabled = useSendButtonDisabled(value);
-  const { visible, hideModal, documentId, selectedChunk, clickDocumentButton } =
-    useClickDrawer();
+
+  // Handler for when user clicks "开始研究" in EditableExecutePlan
+  const handleStartResearchFromPlan = (planContent: string) => {
+    const messageId = uuid();
+    addNewestQuestion({
+      content: planContent,
+      id: messageId,
+      role: MessageType.User,
+    });
+    handleSendMessage({
+      content: planContent,
+      role: MessageType.User,
+      id: messageId,
+    } as any);
+  };
+
+  // 获取路由参数，判断是否为 deepinsight 模式
+  const searchParams = new URLSearchParams(window.location.search);
+  const conversationApi =
+    searchParams.get(ChatSearchParams.ConversationApi) || '';
+  const isDeepinsightMode = conversationApi === 'deepinsightChat';
+  const isDeepinsightConferenceMode =
+    conversationApi === 'deepinsightConferenceQuestion';
+  const isAnyDeepinsightMode = isDeepinsightMode || isDeepinsightConferenceMode;
+
+  // 提取思考数据 - 只包含 process='think' 或 type 为思考相关的项
+  const thinkingData = useMemo(() => {
+    if (!isDeepinsightMode) {
+      return [];
+    }
+    const lastMessage = derivedMessages?.[derivedMessages.length - 1];
+    if (lastMessage?.role !== MessageType.Assistant) {
+      return [];
+    }
+
+    // For deepinsightChat mode: try to get from data.answer/answerArray (streaming) first,
+    // then fall back to content array (historical/stored data)
+    let answerArray =
+      lastMessage?.data?.answer ||
+      lastMessage?.data?.answerArray ||
+      (Array.isArray(lastMessage?.content) ? lastMessage?.content : null);
+
+    if (Array.isArray(answerArray)) {
+      // Filter to include thinking-related items and result items for the right panel
+      const thinkingTypes = [
+        'thinking_step_outline',
+        'thinking_step_topic',
+        'thinking_step_analysis',
+        'think',
+        'result',
+      ];
+      return (answerArray as AnswerItem[]).filter(
+        (item) =>
+          item?.process === 'think' || thinkingTypes.includes(item?.type),
+      );
+    }
+    return [];
+  }, [derivedMessages, isDeepinsightMode]);
+
+  // 检测完成状态
+  const completionMode = isDeepinsightMode
+    ? 'chat'
+    : isDeepinsightConferenceMode
+      ? 'conference'
+      : null;
+
+  const lastMessageAnswerData = useMemo(() => {
+    const lastMessage = derivedMessages?.[derivedMessages.length - 1];
+    if (lastMessage?.role !== MessageType.Assistant) {
+      return undefined;
+    }
+
+    // DEBUG: Log the structure of lastMessage for conference mode
+    if (isDeepinsightConferenceMode && process.env.NODE_ENV === 'development') {
+      console.log('[Conference Mode] lastMessage structure:', {
+        content: lastMessage?.content,
+        data: lastMessage?.data,
+        isContentArray: Array.isArray(lastMessage?.content),
+        contentType: typeof lastMessage?.content,
+      });
+    }
+
+    // For deepinsightConferenceQuestion, extract content from complete conversation data
+    // The content array contains all the message items including completion indicators
+    if (isDeepinsightConferenceMode && Array.isArray(lastMessage?.content)) {
+      return lastMessage?.content;
+    }
+
+    return (
+      lastMessage?.data?.answer ||
+      lastMessage?.data?.answerArray ||
+      (Array.isArray(lastMessage?.content) ? lastMessage?.content : undefined)
+    );
+  }, [derivedMessages, isDeepinsightConferenceMode]);
+
+  const { isCompleted } = useDeepinsightCompletion(
+    lastMessageAnswerData,
+    completionMode,
+  );
+
+  // DEV-only debug: print summary to help troubleshoot filtering issues
+  // placed after filteredMessages is computed so we can inspect results
+  // (only in development to avoid noise in production)
+
+  // DEV-only debug: print summary to help troubleshoot filtering issues
+  // placed after filteredMessages is computed so we can inspect results
+  // (only in development to avoid noise in production)
+
+  // (debug logging moved down to after filteredMessages declaration)
+
+  // Helper function to check if an item should be filtered out
+  const shouldFilterOutItem = (item: any): boolean => {
+    if (!item) return true;
+    // In deepinsight mode, only keep items with process==='' (empty string) AND type!=='result'
+    // This filters out all items that have a non-empty process and result type items
+    const isEmptyProcess = item.process === '';
+    const isResultType = item.type === 'result';
+
+    return !isEmptyProcess || isResultType;
+  };
+
+  // Helper function to strip think/result tags from content string
+  const stripThinkAndResultTags = (content: string): string => {
+    if (!content) return content;
+    // Remove <think>...</think> and <result>...</result> tags
+    let stripped = content
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<result>[\s\S]*?<\/result>/gi, '');
+    // Clean up any extra whitespace
+    stripped = stripped.replace(/^\s+|\s+$/g, '');
+    return stripped;
+  };
+
+  // 在 deepinsight 模式下，过滤掉 type 为 think 和 result 的内容项
+  const filteredMessages = useMemo(() => {
+    if (!isDeepinsightMode) {
+      return derivedMessages;
+    }
+
+    return derivedMessages
+      ?.map((msg) => {
+        if (msg.role !== MessageType.Assistant) {
+          return msg;
+        }
+
+        const newMsg = { ...msg } as any;
+
+        // Normalize both answer and answerArray to arrays
+        // Also check if content field itself is an array (from streaming data)
+        let answers = Array.isArray(msg.data?.answer)
+          ? msg.data.answer
+          : Array.isArray(msg.data?.answerArray)
+            ? msg.data.answerArray
+            : Array.isArray(msg.content)
+              ? msg.content
+              : null;
+
+        if (!answers || !Array.isArray(answers)) {
+          // Even if no answer array, strip think/result tags from content
+          return {
+            ...newMsg,
+            content: stripThinkAndResultTags(newMsg.content),
+          };
+        }
+
+        // Deep filter: remove blocked items and their nested children
+        const recursiveFilter = (items: any[]): any[] => {
+          return items
+            .filter((item) => !shouldFilterOutItem(item))
+            .map((item) => {
+              // If item has nested children/answer arrays, recursively filter them
+              if (Array.isArray(item.children)) {
+                return {
+                  ...item,
+                  children: recursiveFilter(item.children),
+                };
+              }
+              if (Array.isArray(item.answer)) {
+                return {
+                  ...item,
+                  answer: recursiveFilter(item.answer),
+                };
+              }
+              return item;
+            });
+        };
+
+        const filtered = recursiveFilter(answers);
+
+        if (filtered.length === 0) {
+          // If all content is filtered out, return null to hide this message
+          return null;
+        }
+
+        // Ensure filtered items are used for rendering: write filtered array to content
+        // and also preserve it on data.answer/answerArray for downstream usage
+        newMsg.content = filtered;
+        if (Array.isArray(msg.data?.answer)) {
+          newMsg.data = { ...msg.data, answer: filtered };
+        } else if (Array.isArray(msg.data?.answerArray)) {
+          newMsg.data = { ...msg.data, answerArray: filtered };
+        } else {
+          newMsg.data = { ...msg.data, answer: filtered };
+        }
+
+        return newMsg;
+      })
+      .filter((msg): msg is any => msg !== null)
+      .map((msg: any) => {
+        let contentStr = msg.content;
+
+        // If content is an array (from streaming data), convert to string
+        if (Array.isArray(msg.content)) {
+          contentStr = msg.content
+            .map((item: any) => item.content || '')
+            .join('\n');
+        }
+
+        return {
+          ...msg,
+          content: stripThinkAndResultTags(contentStr),
+        };
+      });
+  }, [derivedMessages, isDeepinsightMode]);
 
   return (
-    <section className="flex flex-col p-5 h-full">
-      <div ref={messageContainerRef} className="flex-1 overflow-auto min-h-0">
-        <div className="w-full pr-5">
-          {derivedMessages?.map((message, i) => {
-            return (
-              <MessageItem
-                loading={
+    <section className="flex flex-col h-full overflow-hidden">
+      <div className="flex flex-1 min-h-0 gap-3 p-5">
+        {/* 左边：聊天内容和输入框 */}
+        <div className="flex-1 flex flex-col min-h-0 min-w-0">
+          <div
+            ref={messageContainerRef}
+            className="flex-1 overflow-auto min-h-0"
+          >
+            <div className="w-full pr-5">
+              {filteredMessages?.map((message, i) => {
+                // Only show completion buttons on the last assistant message
+                const isLastAssistantMessage =
                   message.role === MessageType.Assistant &&
-                  sendLoading &&
-                  derivedMessages.length - 1 === i
-                }
-                key={buildMessageUuidWithRole(message)}
-                item={message}
-                nickname={userInfo.nickname}
-                avatar={userInfo.avatar}
-                avatarDialog={currentDialog.icon}
-                reference={buildMessageItemReference(
-                  {
-                    message: derivedMessages,
-                    reference: conversation.reference,
-                  },
-                  message,
-                )}
-                clickDocumentButton={clickDocumentButton}
-                index={i}
-                removeMessageById={removeMessageById}
-                regenerateMessage={regenerateMessage}
-                sendLoading={sendLoading}
-              ></MessageItem>
-            );
-          })}
+                  filteredMessages.length - 1 === i;
+
+                return (
+                  <MessageItem
+                    loading={
+                      message.role === MessageType.Assistant &&
+                      sendLoading &&
+                      filteredMessages.length - 1 === i
+                    }
+                    key={buildMessageUuidWithRole(message)}
+                    item={message}
+                    nickname={userInfo.nickname}
+                    avatar={userInfo.avatar}
+                    avatarDialog={currentDialog.icon}
+                    reference={buildMessageItemReference(
+                      {
+                        message: filteredMessages,
+                        reference: conversation.reference,
+                      },
+                      message,
+                    )}
+                    clickDocumentButton={clickDocumentButton}
+                    index={i}
+                    removeMessageById={removeMessageById}
+                    regenerateMessage={regenerateMessage}
+                    sendLoading={sendLoading}
+                    isDeepinsightChat={isDeepinsightMode}
+                    isDeepinsightConference={isDeepinsightConferenceMode}
+                    isCompleted={
+                      isLastAssistantMessage && isCompleted
+                        ? isCompleted
+                        : false
+                    }
+                    conversationId={conversationId}
+                    onSendMessage={handleStartResearchFromPlan}
+                  ></MessageItem>
+                );
+              })}
+            </div>
+            <div ref={scrollRef} />
+          </div>
+
+          <div className="mt-3 flex-shrink-0">
+            <NextMessageInput
+              disabled={disabled}
+              sendDisabled={sendDisabled}
+              sendLoading={sendLoading}
+              value={value}
+              onInputChange={handleInputChange}
+              onPressEnter={handlePressEnter}
+              conversationId={conversationId}
+              createConversationBeforeUploadDocument={
+                createConversationBeforeUploadDocument
+              }
+              stopOutputMessage={stopOutputMessage}
+              onUpload={handleUploadFile}
+              isUploading={isUploading}
+              removeFile={removeFile}
+              showAttachmentButton={!isAnyDeepinsightMode}
+              isDeepinsightMode={isAnyDeepinsightMode}
+              selectedKbs={selectedKbs}
+              onKbChange={setSelectedKbs}
+              webSearch={webSearch}
+              onWebSearchChange={setWebSearch}
+            />
+          </div>
         </div>
-        <div ref={scrollRef} />
+
+        {/* 右边的思考面板 - 在 deepinsight 模式下显示 */}
+        {isDeepinsightMode && thinkingPanelVisible && (
+          <div className="w-96 min-w-96 border-l border-gray-200 overflow-y-auto h-full bg-white flex-shrink-0 flex flex-col">
+            <DeepInsightThinkingPanel
+              data={thinkingData}
+              // deepinsightChat 模式下不显示右侧思考/结果面板的加载框
+              loading={isDeepinsightMode ? false : sendLoading}
+            />
+          </div>
+        )}
       </div>
-      <NextMessageInput
-        disabled={disabled}
-        sendDisabled={sendDisabled}
-        sendLoading={sendLoading}
-        value={value}
-        onInputChange={handleInputChange}
-        onPressEnter={handlePressEnter}
-        conversationId={conversationId}
-        createConversationBeforeUploadDocument={
-          createConversationBeforeUploadDocument
-        }
-        stopOutputMessage={stopOutputMessage}
-        onUpload={handleUploadFile}
-        isUploading={isUploading}
-        removeFile={removeFile}
-      />
+
       {visible && (
-        <PdfDrawer
-          visible={visible}
-          hideModal={hideModal}
-          documentId={documentId}
-          chunk={selectedChunk}
-        ></PdfDrawer>
+        <div className="p-5">
+          <PdfDrawer
+            visible={visible}
+            hideModal={hideModal}
+            documentId={documentId}
+            chunk={selectedChunk}
+          ></PdfDrawer>
+        </div>
       )}
     </section>
   );

@@ -19,11 +19,21 @@ import { ConversationDropdown } from './conversation-dropdown';
 type SessionProps = Pick<
   ReturnType<typeof useHandleClickConversationCard>,
   'handleConversationCardClick'
-> & { switchSettingVisible(): void; hasSingleChatBox: boolean };
+> & {
+  switchSettingVisible(): void;
+  hasSingleChatBox: boolean;
+  thinkingPanelVisible?: boolean;
+  onToggleThinkingPanel?: () => void;
+  isDeepinsightMode?: boolean;
+};
+
 export function Sessions({
   hasSingleChatBox,
   handleConversationCardClick,
   switchSettingVisible,
+  thinkingPanelVisible = true,
+  onToggleThinkingPanel,
+  isDeepinsightMode = false,
 }: SessionProps) {
   const { t } = useTranslation();
   const {
@@ -54,7 +64,7 @@ export function Sessions({
   }
 
   return (
-    <section className="p-6 w-[296px]  flex flex-col">
+    <section className="p-6 w-[296px] flex flex-col h-full overflow-hidden">
       <section className="flex items-center text-base justify-between gap-2">
         <div className="flex gap-3 items-center min-w-0">
           <RAGFlowAvatar
@@ -104,7 +114,16 @@ export function Sessions({
           </Card>
         ))}
       </div>
-      <div className="py-2">
+      <div className="space-y-2 py-2 flex-shrink-0">
+        {isDeepinsightMode && onToggleThinkingPanel && (
+          <Button
+            className="w-full"
+            onClick={onToggleThinkingPanel}
+            variant={'outline'}
+          >
+            {thinkingPanelVisible ? '隐藏思考面板' : '显示思考面板'}
+          </Button>
+        )}
         <Button
           className="w-full"
           onClick={switchSettingVisible}

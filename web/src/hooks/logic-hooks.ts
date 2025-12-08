@@ -8,11 +8,12 @@ import { IClientConversation, IMessage } from '@/pages/chat/interface';
 import api from '@/utils/api';
 import { getAuthorization } from '@/utils/authorization-util';
 import { buildMessageUuid } from '@/utils/chat';
+import { parseDeepinsightData } from '@/utils/deepinsight-stream-parser';
 import { PaginationProps, message } from 'antd';
 import { FormInstance } from 'antd/lib';
 import axios from 'axios';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
-import { has, isEmpty, omit } from 'lodash';
+import { has, omit } from 'lodash';
 import {
   ChangeEventHandler,
   useCallback,
@@ -178,14 +179,15 @@ function useSetDoneRecord() {
   }, []);
 
   const allDone = useMemo(() => {
-    return Object.values(doneRecord).every((val) => val);
+    const values = Object.values(doneRecord);
+    return values.length > 0 && values.every((val) => val);
   }, [doneRecord]);
 
   useEffect(() => {
-    if (!isEmpty(doneRecord) && allDone) {
+    if (allDone) {
       clearDoneRecord();
     }
-  }, [allDone, clearDoneRecord, doneRecord]);
+  }, [allDone, clearDoneRecord]);
 
   return {
     doneRecord,
@@ -205,6 +207,13 @@ export const useSendMessageWithSse = (
     useSetDoneRecord();
   const timer = useRef<any>();
   const sseRef = useRef<AbortController>();
+
+  // 判断是否为 deepinsight 类型的 API
+  const isDeepinsightApi = useMemo(() => {
+    return (
+      url === api.deepinsightConferenceQuestion || url === api.deepinsightChat
+    );
+  }, [url]);
 
   const initializeSseRef = useCallback(() => {
     sseRef.current = new AbortController();
@@ -239,6 +248,12 @@ export const useSendMessageWithSse = (
       initializeSseRef();
       try {
         setDoneValue(body, false);
+
+        // 为 deepinsight API 设置更长的超时时间（默认 5 分钟，deepinsight 可能需要 1 小时）
+        const timeoutMs = isDeepinsightApi ? 3600000 : 300000; // 3600s = 1 hour, 300s = 5 min
+        const abortController = controller || sseRef.current;
+        const timeoutId = setTimeout(() => abortController?.abort(), timeoutMs);
+
         const response = await fetch(url, {
           method: 'POST',
           headers: {
@@ -246,8 +261,11 @@ export const useSendMessageWithSse = (
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(omit(body, 'chatBoxId')),
-          signal: controller?.signal || sseRef.current?.signal,
+          signal: abortController?.signal,
         });
+
+        // 请求成功，清除超时计时器
+        clearTimeout(timeoutId);
 
         const res = response.clone().json();
 
@@ -268,12 +286,28 @@ export const useSendMessageWithSse = (
               try {
                 const val = JSON.parse(value?.data || '');
                 const d = val?.data;
+
+                // 调试日志：打印原始数据
+                if (isDeepinsightApi && typeof d !== 'boolean') {
+                }
+
                 if (typeof d !== 'boolean') {
-                  setAnswer({
-                    ...d,
-                    conversationId: body?.conversation_id,
-                    chatBoxId: body.chatBoxId,
-                  });
+                  // 根据 API 类型选择解析器
+                  let parsedAnswer: IAnswer;
+                  if (isDeepinsightApi) {
+                    parsedAnswer = parseDeepinsightData(
+                      d,
+                      body?.conversation_id,
+                      body.chatBoxId,
+                    );
+                  } else {
+                    parsedAnswer = {
+                      ...d,
+                      conversationId: body?.conversation_id,
+                      chatBoxId: body.chatBoxId,
+                    };
+                  }
+                  setAnswer(parsedAnswer);
                 }
               } catch (e) {
                 // Swallow parse errors silently
@@ -291,12 +325,21 @@ export const useSendMessageWithSse = (
         return { data: await res, response };
       } catch (e) {
         setDoneValue(body, true);
-
         resetAnswer();
+
+        // 处理超时和其他错误
+        if (e instanceof DOMException && e.name === 'AbortError') {
+          console.error(
+            'Request timeout or aborted:',
+            isDeepinsightApi
+              ? 'DeepInsight API (1 hour timeout)'
+              : 'Standard API (5 min timeout)',
+          );
+        }
         // Swallow fetch errors silently
       }
     },
-    [initializeSseRef, setDoneValue, url, resetAnswer],
+    [initializeSseRef, setDoneValue, resetAnswer, isDeepinsightApi, url],
   );
 
   const stopOutputMessage = useCallback(() => {
@@ -479,7 +522,7 @@ export const useSelectDerivedMessages = () => {
           }),
           prompt: answer.prompt,
           audio_binary: answer.audio_binary,
-          ...omit(answer, 'reference'),
+          data: omit(answer, ['answer', 'reference', 'prompt', 'audio_binary']),
         },
       ];
     });
@@ -493,7 +536,19 @@ export const useSelectDerivedMessages = () => {
       if (idx !== -1) {
         return pre.map((x) => {
           if (x.id === answer.id) {
-            return { ...x, ...answer, content: answer.answer };
+            return {
+              ...x,
+              content: answer.answer,
+              reference: answer.reference,
+              prompt: answer.prompt,
+              audio_binary: answer.audio_binary,
+              data: omit(answer, [
+                'answer',
+                'reference',
+                'prompt',
+                'audio_binary',
+              ]),
+            };
           }
           return x;
         });
@@ -511,7 +566,7 @@ export const useSelectDerivedMessages = () => {
           }),
           prompt: answer.prompt,
           audio_binary: answer.audio_binary,
-          ...omit(answer, 'reference'),
+          data: omit(answer, ['answer', 'reference', 'prompt', 'audio_binary']),
         },
       ];
     });

@@ -40,14 +40,16 @@ export default defineConfig({
   proxy: [
     {
       context: ['/api/v1/admin'],
-      target: 'http://127.0.0.1:9381/',
+      //113.106.163.66:43005 127.0.0.1:9381 188.239.15.136
+      target: 'http:///188.239.15.136:9381/',
       changeOrigin: true,
       ws: true,
       logger: console,
     },
     {
       context: ['/api', '/v1'],
-      target: 'http://127.0.0.1:9380/',
+      //113.106.163.66:43002   127.0.0.1:9380 http://188.239.15.136/
+      target: 'http://188.239.15.136:9380/',
       changeOrigin: true,
       ws: true,
       logger: console,
