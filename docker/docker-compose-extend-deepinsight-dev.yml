@@ -36,6 +36,7 @@ services:
       - ${SVR_MCP_PORT}:9382 # entry for MCP (host_port:docker_port). The docker_port must match the value you set for `mcp-port` above.
     volumes:
       - ./ragflow-logs:/ragflow/logs
+      - ../web:/ragflow/web
       - ../deepinsight_extends:/ragflow/deepinsight_extends
       - ../api:/ragflow/api
       - ./nginx/ragflow.conf:/etc/nginx/conf.d/ragflow.conf
