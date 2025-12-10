@@ -2,6 +2,7 @@ import asyncio
 from copy import deepcopy
 from datetime import datetime
 import logging
+import random
 import time
 from typing import Any, Dict, Generator, List, Optional
 import uuid
@@ -67,7 +68,7 @@ def is_major_stage(event: Optional[str]) -> bool:
 class ProgressManager:
     """Async progress updater using asyncio.Queue."""
 
-    def __init__(self, messages: List, delay_range=(0.2, 1.0)):
+    def __init__(self, messages: List, delay_range=(2, 5)):
         self.messages = messages
         self.queue: asyncio.Queue = asyncio.Queue()
         self.delay_range = delay_range
@@ -78,22 +79,21 @@ class ProgressManager:
         """Put a progress message reference into the queue."""
         await self.queue.put(progress_ref)
 
-    async def flush_remaining(self):
-        """Flush all remaining progress messages."""
-        while not self.queue.empty():
-            progress_ref = await self.queue.get()
-            if progress_ref is None:
-                break  # stop signal
-            self._refresh_message_reference(progress_ref)
-            yield "progress_update"
-
     async def run(self):
         """Continuously process progress messages with delay."""
         while not self._stopped:
             progress_ref = await self.queue.get()
             if progress_ref is None:
                 break  # stop signal
+            # 在真正发送给前端之前更新百分比
+            if "create_time" in progress_ref and progress_ref.get("percentage", 0) < 99:
+                elapsed = time.time() - progress_ref["create_time"]
+                new_value = min(99, (elapsed / 1800) * 99)
+                progress_ref["percentage"] = round(new_value)
             self._refresh_message_reference(progress_ref)
+            # 添加延迟，使用 delay_range 范围内的随机延迟
+            delay = random.uniform(self.delay_range[0], self.delay_range[1])
+            await asyncio.sleep(delay)
             yield "progress_update"
 
     def stop(self):
@@ -197,12 +197,15 @@ def call_insight(request: ChatRequest, start_chat_time: float, authorization_key
                     elif task.get_name() == "progress_event":
                         try:
                             _ = task.result()
+                            yield _format_answer(messages=messages, start_chat_time=start_chat_time)
+                            # 重新创建 progress_task 以继续处理队列中的消息
+                            if not progress_manager._stopped:
+                                progress_task = asyncio.create_task(progress_gen.__anext__(), name="progress_event")
+                            else:
+                                progress_done = True
                         except StopAsyncIteration:
                             progress_done = True
                             continue
-                        yield _format_answer(messages=messages, start_chat_time=start_chat_time)
-                        # 重新创建 progress_task
-                        progress_task = asyncio.create_task(progress_gen.__anext__(), name="progress_event")
         finally:
             pass
         
@@ -408,15 +411,12 @@ async def merge_progress_to_messages(
             continue
         if "create_time" not in progress_message_ref:
             progress_message_ref["create_time"] = time.time()
+        if "percentage" not in progress_message_ref:
+            progress_message_ref["percentage"] = 0
 
         progress_message_ref["process"] = process
         progress_message_ref["content"] = msg.content.text or ""
         progress_message_ref["type"] = message_type
-    
-        if progress_message_ref.get("percentage", 0) < 99:
-            elapsed = time.time() - progress_message_ref["create_time"]
-            new_value = min(99, (elapsed / 1800) * 99)
-            progress_message_ref["percentage"] = round(new_value)
         
         await progress_manager.enqueue(deepcopy(progress_message_ref))
 
